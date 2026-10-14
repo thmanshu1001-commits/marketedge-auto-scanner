@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MarketEdge Auto Scanner</title>
+<style>
+:root{font-family:system-ui,-apple-system,Segoe UI,sans-serif;color:#e8eef8;background:#0b1220}body{margin:0;padding:18px;max-width:1000px;margin:auto}h1{font-size:1.6rem;margin-bottom:4px}.muted{color:#9eabc0;font-size:.93rem}.panel{background:#131e30;border:1px solid #29384e;border-radius:14px;padding:16px;margin:14px 0}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}button{background:#5b8cff;color:white;border:0;border-radius:9px;padding:11px 14px;font-weight:650}button:disabled{opacity:.5}input{background:#0b1220;color:#fff;border:1px solid #3a4a63;border-radius:8px;padding:10px;max-width:100%}table{border-collapse:collapse;width:100%;font-size:.9rem}th,td{text-align:left;padding:9px;border-bottom:1px solid #29384e}th{color:#aebdd2} .pill{display:inline-block;padding:4px 8px;border-radius:99px;background:#26364d}.good{color:#70e0ac}.warn{color:#ffd27d}.bad{color:#ff9696}.scroll{overflow:auto}.small{font-size:.82rem}
+</style></head><body>
+<h1>MarketEdge <span class="muted">Auto Scanner</span></h1>
+<p class="muted">Daily candles · support/resistance reaction zones · F&O stock shortlist</p>
+<div class="panel">
+<h3>1. Load daily market candles</h3>
+<p class="muted">Uses a Netlify serverless function to request daily candles from Yahoo Finance. This is an unofficial source; availability and symbol coverage can change. Data is not guaranteed real-time.</p>
+<div class="row"><label for="symbols">Symbols (comma-separated NSE tickers)</label><input id="symbols" value="RELIANCE.NS,TCS.NS,INFY.NS,HDFCBANK.NS,ICICIBANK.NS,SBIN.NS,AXISBANK.NS,LT.NS,CIPLA.NS" style="flex:1;min-width:250px"></div>
+<div class="row" style="margin-top:12px"><button id="load">Fetch last 3 months</button><span id="status" class="muted">Ready</span></div>
+<p class="small muted">This default list is only a starter list, not the complete current NSE F&O universe. You can edit it. Use Yahoo ticker format, usually SYMBOL.NS.</p>
+</div>
+<div class="panel"><h3>2. Scanner results</h3><div id="summary" class="muted">Load data to scan. Sample data is not shown as real signals.</div><div class="scroll"><table><thead><tr><th>Symbol</th><th>Setup</th><th>Zone</th><th>Reactions</th><th>Last close</th><th>Last 2 volumes</th></tr></thead><tbody id="results"><tr><td colspan="6" class="muted">No data loaded</td></tr></tbody></table></div></div>
+<div class="panel"><h3>How this scan works</h3><ul class="muted"><li>Uses up to the last 20 completed daily candles returned by the data source.</li><li>Looks for at least 4 spaced reactions near a price zone, with close price near that zone.</li><li>Support: latest two candles red and older volume greater than newer volume.</li><li>Resistance: latest two candles green and older volume greater than newer volume.</li></ul><p class="small warn">This is a screening aid, not investment advice. Verify the chart and data before trading.</p></div>
+<script>
+const $=id=>document.getElementById(id);
+function reactions(candles,side){
+ const cs=candles.slice(-20); if(cs.length<20)return null;
+ const tol=.008, prices=cs.map(c=>side==='SUPPORT'?c.low:c.high);
+ let best=null;
+ for(const p of prices){
+   const hits=[];
+   for(let i=0;i<cs.length;i++){
+     const v=prices[i];
+     if(Math.abs(v-p)/p<=tol && (i===0||Math.abs(v-prices[i-1])/p>.002)) hits.push(i);
+   }
+   const spaced=hits.filter((v,i)=>i===0||v-hits[i-1]>=2);
+   if(spaced.length>=4 && (!best||spaced.length>best.hits.length))best={price:p,hits:spaced};
+ }
+ if(!best)return null;
+ const last=cs[cs.length-1], prev=cs[cs.length-2];
+ if(Math.abs(last.close-best.price)/best.price>.015)return null;
+ const red=c=>c.close<c.open, green=c=>c.close>c.open;
+ if(side==='SUPPORT' && !(red(prev)&&red(last)&&prev.volume>last.volume))return null;
+ if(side==='RESISTANCE' && !(green(prev)&&green(last)&&prev.volume>last.volume))return null;
+ return {price:best.price,hits:best.hits.length,last:last.close,vols:[prev.volume,last.volume]};
+}
+function scan(sym,cs){
+ const out=[];
+ for(const side of ['SUPPORT','RESISTANCE']){const r=reactions(cs,side);if(r)out.push({symbol:sym,side,...r})}
+ return out;
+}
+$('load').onclick=async()=>{
+ const syms=[...new Set($('symbols').value.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean))];
+ if(!syms.length)return;
+ $('load').disabled=true;$('status').textContent='Fetching daily candles…';$('results').innerHTML='';let all=[],ok=0,failed=[];
+ try{
+  for(let i=0;i<syms.length;i+=5){
+   const batch=syms.slice(i,i+5);
+   const r=await fetch('/.netlify/functions/candles?symbols='+encodeURIComponent(batch.join(',')));
+   if(!r.ok)throw new Error('Function returned '+r.status+'. Make sure this project is deployed with Netlify Functions, not Netlify Drop static-only upload.');
+   const data=await r.json();
+   for(const [sym,obj] of Object.entries(data.results||{})){
+    if(obj.error||!obj.candles?.length){failed.push(sym);continue}
+    ok++; all.push(...scan(sym,obj.candles));
+   }
+  }
+  $('results').innerHTML=all.length?all.map(x=>`<tr><td>${x.symbol}</td><td><span class="pill">${x.side}</span></td><td>${Number(x.price).toFixed(2)}</td><td>${x.hits}</td><td>${Number(x.last).toFixed(2)}</td><td>${Number(x.vols[0]).toLocaleString()} → ${Number(x.vols[1]).toLocaleString()}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No matching setups found in loaded symbols.</td></tr>';
+  $('summary').textContent=`Loaded ${ok} symbols; ${all.length} matching setup(s).`+(failed.length?` Failed/unavailable: ${failed.join(', ')}`:'');
+  $('status').textContent='Finished';
+ }catch(e){$('status').textContent='Could not load';$('summary').innerHTML='<span class="bad">'+e.message+'</span>'; }
+ finally{$('load').disabled=false}
+};
+</script></body></html>
